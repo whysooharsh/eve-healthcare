@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app import models, schemas
 from app.auth import get_current_user
+from app.cache import get_json, invalidate, set_json
 from app.database import get_db
 
 router = APIRouter(tags=["centres"])
@@ -14,20 +15,34 @@ def create_centre(body: schemas.CentreIn, db: Session = Depends(get_db), _: mode
     db.add(centre)
     db.commit()
     db.refresh(centre)
+    invalidate("centres:")
     return centre
 
 
 @router.get("/centres/", response_model=list[schemas.CentreOut])
 def list_centres(limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0), db: Session = Depends(get_db)):
-    return db.query(models.Centre).order_by(models.Centre.id).offset(offset).limit(limit).all()
+    key = f"centres:list:{limit}:{offset}"
+    cached = get_json(key)
+    if cached is not None:
+        return cached
+    rows = db.query(models.Centre).order_by(models.Centre.id).offset(offset).limit(limit).all()
+    out = [schemas.CentreOut.model_validate(r).model_dump() for r in rows]
+    set_json(key, out)
+    return out
 
 
 @router.get("/centres/{centre_id}", response_model=schemas.CentreDetailOut)
 def get_centre(centre_id: int, db: Session = Depends(get_db)):
+    key = f"centres:detail:{centre_id}"
+    cached = get_json(key)
+    if cached is not None:
+        return cached
     centre = db.get(models.Centre, centre_id)
     if not centre:
         raise HTTPException(status_code=404, detail="Centre not found")
-    return centre
+    out = schemas.CentreDetailOut.model_validate(centre).model_dump()
+    set_json(key, out)
+    return out
 
 
 @router.post("/tests/", response_model=schemas.TestOut, status_code=201)
@@ -38,6 +53,7 @@ def create_test(body: schemas.TestIn, db: Session = Depends(get_db), _: models.U
     db.add(test)
     db.commit()
     db.refresh(test)
+    invalidate("tests:", "centres:")
     return test
 
 
@@ -51,4 +67,11 @@ def list_tests(
     q = db.query(models.DiagnosticTest).order_by(models.DiagnosticTest.id)
     if centre_id is not None:
         q = q.filter_by(centre_id=centre_id)
-    return q.offset(offset).limit(limit).all()
+    key = f"tests:list:{centre_id}:{limit}:{offset}"
+    cached = get_json(key)
+    if cached is not None:
+        return cached
+    rows = q.offset(offset).limit(limit).all()
+    out = [schemas.TestOut.model_validate(r).model_dump() for r in rows]
+    set_json(key, out)
+    return out
